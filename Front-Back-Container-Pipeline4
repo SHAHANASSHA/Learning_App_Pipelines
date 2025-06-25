@@ -1,0 +1,143 @@
+pipeline {
+    agent { label 'almabuilder' }
+
+    environment {
+        BUILD_SERVER = "synnefo@172.16.99.27"
+        REGISTRY = "172.16.99.27:5678"
+        IMAGE_NAME = "front-image"
+    }
+
+    triggers {
+        githubPush()
+    }
+
+    stages {
+        stage('GIT-CONNECTION') {
+            steps {
+                git url: 'https://github.com/SHAHANASSHA/playground-frontend-backend.git', branch: 'main'
+            }
+        }
+
+        stage('VALIDATE-COMMIT-TRIGGER') {
+            steps {
+                sh 'git fetch --tags'
+                script {
+                    def commitMessage = sh(script: "git log -1 --pretty=%B", returnStdout: true).trim()
+                    echo "Commit message: ${commitMessage}"
+                    if (commitMessage =~ /major|minor|patch/) {
+                        echo "Commit message contains version bump keyword"
+                        env.IS_TAGGED = 'true'
+                    } else {
+                        echo "No version bump keyword in commit message, aborting pipeline"
+                        currentBuild.result = 'ABORTED'
+                        error("No version bump keyword in commit message; aborting pipeline.")
+                    }
+                }
+            }
+        }
+
+        stage('SEMANTIC-VERSIONING') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'GitPush',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_PASS'
+                )]) {
+                    script {
+                        sh '''
+                            git fetch --tags
+                            git config user.name "$GIT_USER"
+                            git config user.email "shashahanas5@gmail.com"
+                            git remote set-url origin https://$GIT_USER:$GIT_PASS@github.com/SHAHANASSHA/playground-frontend-backend.git
+                            chmod +x ./version.sh
+                            ./version.sh
+                        '''
+                        VERSION = sh(script: "git describe --tags --abbrev=0", returnStdout: true).trim()
+                        echo "Version from tag: ${VERSION}"
+                    }
+                }
+            }
+        }
+
+        stage('DOCKER-BUILD-IMAGE') {
+            when {
+                environment name: 'IS_TAGGED', value: 'true'
+            }
+            steps {
+                script {
+                    sh "docker build -t ${IMAGE_NAME}:${VERSION} ."
+                }
+            }
+        }
+
+        stage('DOCKER-PUSH-IMAGE') {
+            when {
+                environment name: 'IS_TAGGED', value: 'true'
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'NexusLogin',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    script {
+                        sh """
+                            echo "$DOCKER_PASS" | docker login ${REGISTRY} -u "$DOCKER_USER" --password-stdin
+                            docker tag "${IMAGE_NAME}:${VERSION}" "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+                            docker push "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('DOCKER-PULL-IMAGE') {
+            when {
+                environment name: 'IS_TAGGED', value: 'true'
+            }
+            steps {
+                script {
+                    sh "docker pull ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+                }
+            }
+        }
+
+        stage('DOCKER-RUN-CONTAINER') {
+            when {
+                environment name: 'IS_TAGGED', value: 'true'
+            }
+            steps {
+                script {
+                    def imageTag = "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+                    sh '''
+                        docker rm -f frontend-container || true
+
+                        CONTAINER_USING_PORT=$(docker ps -q --filter "publish=3000")
+                        if [ ! -z "$CONTAINER_USING_PORT" ]; then
+                            echo "Port 3000 is already in use by container $CONTAINER_USING_PORT. Stopping it..."
+                            docker rm -f $CONTAINER_USING_PORT
+                        fi
+                    '''
+                    sh "docker run -d --name frontend-container -p 3000:3000 -v \$(pwd)/db:/db ${imageTag}"
+                }
+            }
+        }
+
+        stage('PRUNE-UNWANTED-IMAGES') {
+            steps {
+                sh "docker image prune -af"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Image Build and Container Runned Successfully!"
+        }
+        failure {
+            echo "Something Went Wrong!"
+        }
+    }
+}
