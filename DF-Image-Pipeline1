@@ -18,7 +18,7 @@ pipeline {
             }
         }
 
-    stage('VALIDATE-TAG-TRIGGER') {
+        stage('VALIDATE-TAG-TRIGGER') {
             when {
                 tag "v*"
             }
@@ -26,8 +26,8 @@ pipeline {
                 echo "Triggered by tag matching v*"
             }
         }
-        
-    stage('VALIDATE-COMMIT-TRIGGER') {
+
+        stage('VALIDATE-COMMIT-TRIGGER') {
             steps {
                 sh 'git fetch --tags'
                 script {
@@ -44,7 +44,6 @@ pipeline {
                 }
             }
         }
-
 
         stage('SEMANTIC-VERSIONING') {
             steps {
@@ -95,6 +94,15 @@ pipeline {
                     }
                 }
             }
+        }
+    }
+
+    post {
+        success {
+            echo "Image Build and Pushed Successfully!"
+        }
+        failure {
+            echo "Something Went Wrong!"
         }
     }
 }
