@@ -1,0 +1,100 @@
+pipeline {
+    agent { label 'almabuilder' }
+
+    environment {
+        BUILD_SERVER = "synnefo@172.16.99.27"
+        REGISTRY = "localhost:5678"
+        IMAGE_NAME = "docker-image"
+    }
+
+    triggers {
+        githubPush()
+    }
+
+    stages {
+        stage('GIT-CONNECTION') {
+            steps {
+                git url: 'https://github.com/SHAHANASSHA/playground-image.git', branch: 'main'
+            }
+        }
+
+    stage('VALIDATE-TAG-TRIGGER') {
+            when {
+                tag "v*"
+            }
+            steps {
+                echo "Triggered by tag matching v*"
+            }
+        }
+        
+    stage('VALIDATE-COMMIT-TRIGGER') {
+            steps {
+                sh 'git fetch --tags'
+                script {
+                    def commitMessage = sh(script: "git log -1 --pretty=%B", returnStdout: true).trim()
+                    echo "Commit message: ${commitMessage}"
+                    if (commitMessage =~ /major|minor|patch/) {
+                        echo "Commit message contains version bump keyword"
+                        env.IS_TAGGED = 'true'
+                    } else {
+                        echo "No version bump keyword in commit message, aborting pipeline"
+                        currentBuild.result = 'ABORTED'
+                        error("No version bump keyword in commit message; aborting pipeline.")
+                    }
+                }
+            }
+        }
+
+
+        stage('SEMANTIC-VERSIONING') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'GitPush',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_PASS'
+                )]) {
+                    script {
+                        sh """
+                            git config user.name "$GIT_USER"
+                            git config user.email "shashahnas5@gmail.com"
+                            git remote set-url origin https://$GIT_USER:$GIT_PASS@github.com/SHAHANASSHA/playground-image.git
+                            chmod +x ./version.sh
+                            ./version.sh
+                        """
+                        env.VERSION = sh(script: "git describe --tags --abbrev=0", returnStdout: true).trim()
+                        echo "Version from tag: ${env.VERSION}"
+                    }
+                }
+            }
+        }
+
+        stage('DOCKER-BUILD-IMAGE') {
+            steps {
+                script {
+                    echo "Building Docker image with tag: ${env.VERSION}"
+                    sh "docker build -t ${IMAGE_NAME}:${env.VERSION} ."
+                }
+            }
+        }
+
+        stage('DOCKER-PUSH-IMAGE') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'NexusLogin',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    script {
+                        sh """
+                            docker login ${REGISTRY} -u $DOCKER_USER -p $DOCKER_PASS
+                            docker tag ${IMAGE_NAME}:${env.VERSION} ${REGISTRY}/${IMAGE_NAME}:${env.VERSION}
+                            docker push ${REGISTRY}/${IMAGE_NAME}:${env.VERSION}
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
