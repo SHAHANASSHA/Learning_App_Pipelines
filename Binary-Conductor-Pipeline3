@@ -1,0 +1,131 @@
+pipeline {
+    agent { label 'almabuilder' }
+
+    environment {
+        BIN_PATH = "/usr/local/bin/conductor"
+        REPO = "https://github.com/SHAHANASSHA/playground-conductor.git"
+        SRC_DIR = "/tmp/conductor"
+        SUDO_PASS = "Asd123."
+        IS_TAGGED = 'false'
+        TAR_CALL = "conductor" 
+        NEXUS_URL = "http://172.16.99.27:2000/repository/NEXUS-Artifacts/" 
+    }
+
+    triggers {
+        githubPush()
+    }
+
+    stages {
+
+        stage('CLONE-CONDUCTOR-REPO') {
+            steps {
+                sh """
+                    rm -rf "${SRC_DIR}"
+                    git clone "${REPO}" "${SRC_DIR}"
+                """
+            }
+        }
+
+        stage('SEMANTIC-VERSIONING') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'GitPush',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_PASS'
+                )]) {
+                    script {
+                        sh """
+                            cd "${SRC_DIR}"
+                            git fetch --tags
+                            git config user.name "${GIT_USER}"
+                            git config user.email "shashanas5@gmail.com"
+                            git remote set-url origin https://${GIT_USER}:${GIT_PASS}@github.com/SHAHANASSHA/playground-conductor.git
+                            chmod +x ./version.sh
+                            ./version.sh
+                        """
+                        env.VERSION = sh(
+                            script: "cd '${SRC_DIR}' && git describe --tags --abbrev=0 || echo v0.0.1",
+                            returnStdout: true
+                        ).trim()
+                        echo "Version from tag: ${env.VERSION}"
+                    }
+                }
+            }
+        }
+
+        stage('BUILD-GO-BINARY') {
+            steps {
+                sh """
+                    cd ${SRC_DIR}
+                    chmod +x ./install.sh
+                    bash ./install.sh
+                """
+            }
+        }
+
+        stage('CREATE-TARCALL') {
+            steps {
+                script {
+                    def tarFile = "${env.TAR_CALL}-${env.VERSION}.tar.gz"
+                    def binaryPath = "${env.SRC_DIR}/conductor"
+
+                    if (!fileExists(binaryPath)) {
+                        error("Error: '${binaryPath}' does not exist.")
+                    }
+
+                    sh """
+                        cd "${SRC_DIR}"
+                        echo "${SUDO_PASS}" | sudo -S tar -czf "${tarFile}" conductor
+                        ls -lh "${tarFile}"
+                    """
+                }
+            }
+        }
+
+        stage('UPLOAD-TARCALL-NEXUS') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'NexusLogin',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    script {
+                        def tarFile = "${env.TAR_CALL}-${env.VERSION}.tar.gz"
+                        def nexusUrl = "${env.NEXUS_URL}/${env.TAR_CALL}/${env.VERSION}/${tarFile}"
+
+                        echo "Uploading ${tarFile} to Nexus at ${nexusUrl}"
+
+                        sh """
+                            curl -f -v -u ${DOCKER_USER}:${DOCKER_PASS} \
+                            --upload-file "${SRC_DIR}/${tarFile}" \
+                            "${nexusUrl}"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('INSTALL-ENABLE-START-REDIS') {
+            steps {
+                sh """
+                    if ! rpm -q redis > /dev/null; then
+                        echo "${SUDO_PASS}" | sudo -S dnf install redis -y
+                    else
+                        echo "Redis already installed."
+                    fi
+
+                    echo "${SUDO_PASS}" | sudo -S systemctl enable redis
+                    echo "${SUDO_PASS}" | sudo -S systemctl start redis
+                """
+            }
+        }
+
+        stage('VERIFY-SERVICE-START-CONTAINER') {
+            steps {
+                sh """
+                    systemctl --user status conductor.service
+                """
+            }
+        }
+    }
+}
