@@ -120,17 +120,6 @@ pipeline {
             }
         }
 
-        stage('CREATE-MANAGE-SERVICE') {
-            steps {
-                sh """
-                    echo "${SUDO_PASS}" | sudo -S systemctl daemon-reexec
-                    echo "${SUDO_PASS}" | sudo -S systemctl daemon-reload
-                    echo "${SUDO_PASS}" | sudo -S systemctl enable bender.service
-                    echo "${SUDO_PASS}" | sudo -S systemctl restart bender.service
-                """
-            }
-        }
-
         stage('VERIFY-SERVICE-START-CONTAINER') {
             steps {
                 sh """
